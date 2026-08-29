@@ -66,9 +66,9 @@ if st.button("🚀 일간 브리핑 생성하기"):
 3. ⚠️ **내일 주목할 포인트/액션 제안**: 리스크 관리 관점의 팁 1줄
 """
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt
-            )
+    model='gemini-2.0-flash',
+    contents=prompt
+)
             
             st.subheader("🤖 AI 맞춤형 분석 브리핑")
             st.markdown(response.text)
