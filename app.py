@@ -5,7 +5,7 @@ import pandas as pd
 
 st.set_page_config(page_title="AI 포트폴리오 일간 브리핑", layout="wide")
 
-# API 키 설정 (Streamlit Secrets 또는 사이드바 입력)
+# API 키 설정
 api_key = st.secrets.get("GEMINI_API_KEY", "")
 if not api_key:
     api_key = st.sidebar.text_input("Gemini API Key를 입력하세요", type="password")
@@ -22,7 +22,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
     if not api_key:
         st.error("Gemini API Key를 입력해 주세요.")
     else:
-        # Gemini API 키 등록
+        # API 키 등록
         genai.configure(api_key=api_key.strip())
         
         tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
@@ -58,7 +58,27 @@ if st.button("🚀 일간 브리핑 생성하기"):
 
         with st.spinner("AI가 공시 및 뉴스를 분석하는 중..."):
             try:
-                model = genai.GenerativeModel('gemini-1.5-flash')
+                # 계정에서 지원하는 텍스트 생성 가능 모델 자동 탐색
+                available_models = [
+                    m.name for m in genai.list_models() 
+                    if 'generateContent' in m.supported_generation_methods
+                ]
+                
+                # 선호 모델 우선순위 매칭
+                selected_model_name = None
+                for candidate in ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash', 'gemini-pro']:
+                    for m in available_models:
+                        if candidate in m:
+                            selected_model_name = m
+                            break
+                    if selected_model_name:
+                        break
+                
+                if not selected_model_name:
+                    selected_model_name = available_models[0] if available_models else 'models/gemini-1.5-flash'
+
+                model = genai.GenerativeModel(selected_model_name)
+                
                 prompt = f"""
 당신은 금융 데이터 전문 애널리스트입니다.
 아래 사용자의 포트폴리오 현황과 종목별 최신 뉴스 데이터를 바탕으로 '일간 맞춤 브리핑 리포트'를 한글로 작성해주세요.
