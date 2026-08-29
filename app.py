@@ -29,51 +29,45 @@ if st.button("🚀 일간 브리핑 생성하기"):
             news_data = []
             
             for ticker in tickers:
-                close_price = None
-                change_pct = None
+                close_str = "N/A"
+                change_str = "0.00%"
                 
-                # 1) yf.download로 최근 1개월 데이터 안전 조회 (ETF/주식 공통 호환)
                 try:
-                    df = yf.download(ticker, period="1mo", progress=False)
-                    if not df.empty and 'Close' in df.columns:
-                        close_series = df['Close'].dropna()
-                        if len(close_series) >= 2:
-                            # 멀티인덱스 컬럼 처리
-                            p_today = float(close_series.iloc[-1].values[0]) if hasattr(close_series.iloc[-1], 'values') else float(close_series.iloc[-1])
-                            p_prev = float(close_series.iloc[-2].values[0]) if hasattr(close_series.iloc[-2], 'values') else float(close_series.iloc[-2])
+                    # 1. 주가 데이터 조회 (안정적인 10일치 히스토리)
+                    ticker_obj = yf.Ticker(ticker)
+                    hist = ticker_obj.history(period="10d")
+                    
+                    if not hist.empty and 'Close' in hist:
+                        # 결측치 제거 후 종가 리스트 추출
+                        close_vals = hist['Close'].dropna().tolist()
+                        
+                        if len(close_vals) >= 2:
+                            p_today = float(close_vals[-1])
+                            p_prev = float(close_vals[-2])
+                            diff_pct = ((p_today - p_prev) / p_prev) * 100
                             
-                            close_price = f"${p_today:.2f}"
-                            change_pct = f"{((p_today - p_prev) / p_prev) * 100:+.2f}%"
+                            close_str = f"${p_today:.2f}"
+                            change_str = f"{diff_pct:+.2f}%"
+                        elif len(close_vals) == 1:
+                            p_today = float(close_vals[-1])
+                            close_str = f"${p_today:.2f}"
+                            change_str = "0.00%"
                 except Exception:
                     pass
                 
-                # 2) 만약 download로 못 가져왔을 경우 fast_info fallback
-                if not close_price:
-                    try:
-                        t_obj = yf.Ticker(ticker)
-                        last_price = t_obj.fast_info.get('last_price')
-                        prev_close = t_obj.fast_info.get('previous_close')
-                        if last_price and prev_close:
-                            close_price = f"${last_price:.2f}"
-                            diff = ((last_price - prev_close) / prev_close) * 100
-                            change_pct = f"{diff:+.2f}%"
-                    except Exception:
-                        pass
-                
-                # 수치 확정
                 market_data.append({
                     "Ticker": ticker,
-                    "Close": close_price if close_price else "N/A",
-                    "Change (%)": change_pct if change_pct else "0.00%"
+                    "Close": close_str,
+                    "Change (%)": change_str
                 })
                 
-                # 최신 뉴스 수집
+                # 2. 최신 뉴스 헤드라인 수집
                 try:
-                    t_obj = yf.Ticker(ticker)
-                    news = t_obj.news
-                    if news and len(news) > 0:
-                        titles = [n.get('title') for n in news[:2] if n.get('title')]
-                        news_text = " / ".join(titles) if titles else "최신 뉴스 없음"
+                    ticker_obj = yf.Ticker(ticker)
+                    news_list = getattr(ticker_obj, 'news', [])
+                    if news_list and isinstance(news_list, list):
+                        titles = [item.get('title') for item in news_list[:2] if isinstance(item, dict) and item.get('title')]
+                        news_text = " / ".join(titles) if titles else "최신 특이 뉴스 없음"
                         news_data.append(f"[{ticker}] {news_text}")
                     else:
                         news_data.append(f"[{ticker}] 특이 뉴스 없음")
