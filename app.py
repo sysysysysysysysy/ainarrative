@@ -29,41 +29,59 @@ if st.button("🚀 일간 브리핑 생성하기"):
             news_data = []
             
             for ticker in tickers:
-                close_str = "N/A"
-                change_str = "0.00%"
+                close_str = None
+                change_str = None
+                ticker_obj = yf.Ticker(ticker)
                 
+                # [방법 1] 1개월치 history 데이터에서 최신 2개 거래일 추출
                 try:
-                    # 1. 주가 데이터 조회 (안정적인 10일치 히스토리)
-                    ticker_obj = yf.Ticker(ticker)
-                    hist = ticker_obj.history(period="10d")
-                    
+                    hist = ticker_obj.history(period="1mo")
                     if not hist.empty and 'Close' in hist:
-                        # 결측치 제거 후 종가 리스트 추출
                         close_vals = hist['Close'].dropna().tolist()
-                        
                         if len(close_vals) >= 2:
                             p_today = float(close_vals[-1])
                             p_prev = float(close_vals[-2])
                             diff_pct = ((p_today - p_prev) / p_prev) * 100
-                            
                             close_str = f"${p_today:.2f}"
                             change_str = f"{diff_pct:+.2f}%"
-                        elif len(close_vals) == 1:
-                            p_today = float(close_vals[-1])
-                            close_str = f"${p_today:.2f}"
-                            change_str = "0.00%"
                 except Exception:
                     pass
                 
+                # [방법 2] history 실패 시 fast_info 조회
+                if not close_str:
+                    try:
+                        f_info = ticker_obj.fast_info
+                        p_today = f_info.last_price
+                        p_prev = f_info.previous_close
+                        if p_today and p_prev:
+                            close_str = f"${float(p_today):.2f}"
+                            diff_pct = ((float(p_today) - float(p_prev)) / float(p_prev)) * 100
+                            change_str = f"{diff_pct:+.2f}%"
+                    except Exception:
+                        pass
+                
+                # [방법 3] 일반 info 메타데이터 조회
+                if not close_str:
+                    try:
+                        info = ticker_obj.info
+                        p_today = info.get('regularMarketPrice') or info.get('navPrice') or info.get('previousClose')
+                        p_prev = info.get('regularMarketPreviousClose') or info.get('previousClose')
+                        if p_today and p_prev:
+                            close_str = f"${float(p_today):.2f}"
+                            diff_pct = ((float(p_today) - float(p_prev)) / float(p_prev)) * 100
+                            change_str = f"{diff_pct:+.2f}%"
+                    except Exception:
+                        pass
+
+                # 최종 데이터 확정 (값 없으면 fallback)
                 market_data.append({
                     "Ticker": ticker,
-                    "Close": close_str,
-                    "Change (%)": change_str
+                    "Close": close_str if close_str else "N/A",
+                    "Change (%)": change_str if change_str else "0.00%"
                 })
                 
-                # 2. 최신 뉴스 헤드라인 수집
+                # 최신 뉴스 헤드라인 수집
                 try:
-                    ticker_obj = yf.Ticker(ticker)
                     news_list = getattr(ticker_obj, 'news', [])
                     if news_list and isinstance(news_list, list):
                         titles = [item.get('title') for item in news_list[:2] if isinstance(item, dict) and item.get('title')]
