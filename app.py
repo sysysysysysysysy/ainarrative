@@ -58,28 +58,12 @@ if st.button("🚀 일간 브리핑 생성하기"):
 
         with st.spinner("AI가 공시 및 뉴스를 분석하는 중..."):
             try:
-                # 계정에서 지원하는 텍스트 생성 가능 모델 자동 탐색
-                available_models = [
-                    m.name for m in genai.list_models() 
-                    if 'generateContent' in m.supported_generation_methods
-                ]
-                
-                # 선호 모델 우선순위 매칭
-                selected_model_name = None
-                for candidate in ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash', 'gemini-pro']:
-                    for m in available_models:
-                        if candidate in m:
-                            selected_model_name = m
-                            break
-                    if selected_model_name:
-                        break
-                
-                if not selected_model_name:
-                    selected_model_name = available_models[0] if available_models else 'models/gemini-1.5-flash'
-
-                model = genai.GenerativeModel(selected_model_name)
-                
-                prompt = f"""
+                # 무료 티어가 넉넉한 Flash 계열 모델 순차 시도
+                response_text = None
+                for target_model in ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']:
+                    try:
+                        model = genai.GenerativeModel(target_model)
+                        prompt = f"""
 당신은 금융 데이터 전문 애널리스트입니다.
 아래 사용자의 포트폴리오 현황과 종목별 최신 뉴스 데이터를 바탕으로 '일간 맞춤 브리핑 리포트'를 한글로 작성해주세요.
 
@@ -94,9 +78,16 @@ if st.button("🚀 일간 브리핑 생성하기"):
 2. 🔍 **종목별 핵심 변동 원인 & 리스크 요인**: 각 종목별로 당일 등락 이유와 공시/뉴스 핵심을 2~3줄로 요약
 3. ⚠️ **내일 주목할 포인트/액션 제안**: 리스크 관리 관점의 팁 1줄
 """
-                response = model.generate_content(prompt)
+                        res = model.generate_content(prompt)
+                        response_text = res.text
+                        break
+                    except Exception:
+                        continue
                 
-                st.subheader("🤖 AI 맞춤형 분석 브리핑")
-                st.markdown(response.text)
+                if response_text:
+                    st.subheader("🤖 AI 맞춤형 분석 브리핑")
+                    st.markdown(response_text)
+                else:
+                    st.error("AI 응답을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.")
             except Exception as e:
                 st.error(f"AI 분석 중 오류가 발생했습니다: {e}")
