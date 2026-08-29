@@ -75,7 +75,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
 """
                 # 무료 티어에서 완벽 지원되는 gemini-2.0-flash 호출
                 response = client.models.generate_content(
-    model='gemini-2.5-flash',
+    model='gemini-3.6-flash',
     contents=prompt
 )
                 
