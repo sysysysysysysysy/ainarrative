@@ -29,41 +29,49 @@ if st.button("🚀 일간 브리핑 생성하기"):
             news_data = []
             
             for ticker in tickers:
-                try:
-                    stock = yf.Ticker(ticker)
-                    # 1달치 데이터를 가져온 후 결측치(NaN) 제거
-                    hist = stock.history(period="1mo").dropna(subset=['Close'])
-                    
-                    if len(hist) >= 2:
-                        today_close = hist['Close'].iloc[-1]
-                        prev_close = hist['Close'].iloc[-2]
-                        change_pct = ((today_close - prev_close) / prev_close) * 100
-                        market_data.append({
-                            "Ticker": ticker, 
-                            "Close": f"${today_close:.2f}", 
-                            "Change (%)": f"{change_pct:+.2f}%"
-                        })
-                    elif len(hist) == 1:
-                        today_close = hist['Close'].iloc[-1]
-                        market_data.append({
-                            "Ticker": ticker, 
-                            "Close": f"${today_close:.2f}", 
-                            "Change (%)": "0.00%"
-                        })
-                    else:
-                        market_data.append({
-                            "Ticker": ticker, 
-                            "Close": "N/A", 
-                            "Change (%)": "N/A"
-                        })
-                except Exception as e:
-                    market_data.append({"Ticker": ticker, "Close": "Error", "Change (%)": "Error"})
+                close_price = None
+                change_pct = None
                 
-                # 최신 뉴스 수집 (예외 처리 강화)
+                # 1) yf.download로 최근 1개월 데이터 안전 조회 (ETF/주식 공통 호환)
                 try:
-                    news = stock.news
+                    df = yf.download(ticker, period="1mo", progress=False)
+                    if not df.empty and 'Close' in df.columns:
+                        close_series = df['Close'].dropna()
+                        if len(close_series) >= 2:
+                            # 멀티인덱스 컬럼 처리
+                            p_today = float(close_series.iloc[-1].values[0]) if hasattr(close_series.iloc[-1], 'values') else float(close_series.iloc[-1])
+                            p_prev = float(close_series.iloc[-2].values[0]) if hasattr(close_series.iloc[-2], 'values') else float(close_series.iloc[-2])
+                            
+                            close_price = f"${p_today:.2f}"
+                            change_pct = f"{((p_today - p_prev) / p_prev) * 100:+.2f}%"
+                except Exception:
+                    pass
+                
+                # 2) 만약 download로 못 가져왔을 경우 fast_info fallback
+                if not close_price:
+                    try:
+                        t_obj = yf.Ticker(ticker)
+                        last_price = t_obj.fast_info.get('last_price')
+                        prev_close = t_obj.fast_info.get('previous_close')
+                        if last_price and prev_close:
+                            close_price = f"${last_price:.2f}"
+                            diff = ((last_price - prev_close) / prev_close) * 100
+                            change_pct = f"{diff:+.2f}%"
+                    except Exception:
+                        pass
+                
+                # 수치 확정
+                market_data.append({
+                    "Ticker": ticker,
+                    "Close": close_price if close_price else "N/A",
+                    "Change (%)": change_pct if change_pct else "0.00%"
+                })
+                
+                # 최신 뉴스 수집
+                try:
+                    t_obj = yf.Ticker(ticker)
+                    news = t_obj.news
                     if news and len(news) > 0:
-                        # 최신 뉴스 최대 2개 추출
                         titles = [n.get('title') for n in news[:2] if n.get('title')]
                         news_text = " / ".join(titles) if titles else "최신 뉴스 없음"
                         news_data.append(f"[{ticker}] {news_text}")
@@ -74,10 +82,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
             
             # 주가 요약 테이블 표시
             st.subheader("📈 포트폴리오 최근 거래일 현황")
-            if market_data:
-                st.dataframe(pd.DataFrame(market_data), use_container_width=True)
-            else:
-                st.warning("주가 데이터를 불러오지 못했습니다. 티커명을 확인해 주세요.")
+            st.dataframe(pd.DataFrame(market_data), use_container_width=True)
 
         with st.spinner("AI가 공시 및 뉴스를 분석하는 중..."):
             try:
