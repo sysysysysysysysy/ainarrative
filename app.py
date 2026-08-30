@@ -3,8 +3,6 @@ import yfinance as yf
 from google import genai
 import pandas as pd
 import plotly.express as px
-import json
-import re
 import time
 
 st.set_page_config(page_title="AI 포트폴리오 일간 브리핑", layout="wide")
@@ -44,7 +42,7 @@ selected_period_label = st.sidebar.selectbox(
 )
 chart_period = period_mapping[selected_period_label]
 
-# 주요 종목 사전 (API 쿼터 절약)
+# 주요 종목 사전
 COMMON_STOCK_MAP = {
     "삼성전자": {"display_name": "삼성전자 (005930.KS)", "ticker": "005930.KS"},
     "SK하이닉스": {"display_name": "SK하이닉스 (000660.KS)", "ticker": "000660.KS"},
@@ -70,7 +68,6 @@ COMMON_STOCK_MAP = {
 }
 
 def resolve_stock_info(user_text):
-    """사전 매핑 및 표준 티커 자동 파싱 (Gemini API 쿼터 사용 안 함)"""
     items = [t.strip() for t in user_text.split(',') if t.strip()]
     resolved_list = []
 
@@ -88,7 +85,6 @@ def resolve_stock_info(user_text):
     return resolved_list
 
 def fetch_daily_summary(ticker_symbol, is_korean):
-    """일간 최신 종가 및 전일비 등락률 산출"""
     close_str = "N/A"
     change_str = "0.00%"
     currency_symbol = "₩" if is_korean else "$"
@@ -110,9 +106,7 @@ def fetch_daily_summary(ticker_symbol, is_korean):
     return close_str, change_str
 
 def fetch_chart_data(ticker_symbol, period):
-    """기간별 적정 인터벌을 적용한 차트 데이터 수집"""
     interval = "5m" if period == "1d" else ("15m" if period == "5d" else "1d")
-    
     try:
         df = yf.download(
             ticker_symbol, 
@@ -141,36 +135,49 @@ def fetch_chart_data(ticker_symbol, period):
 
     return pd.Series(dtype='float64')
 
-# 10분간 동일 요청 캐싱 (API 쿼터 절약)
-@st.cache_data(ttl=600, show_spinner=False)
-def generate_ai_briefing(api_key_str, market_data_str, news_data_str):
+def generate_ai_briefing(api_key_str, market_data, news_data):
     client = genai.Client(api_key=api_key_str)
     prompt = f"""
 당신은 금융 데이터 전문 애널리스트입니다.
 아래 사용자의 포트폴리오 현황(주가 및 등락률)과 종목별 최신 뉴스 데이터를 바탕으로 '일간 맞춤 브리핑 리포트'를 한글로 작성해주세요.
 
 [포트폴리오 정보]
-{market_data_str}
+{market_data}
 
 [종목별 최신 뉴스]
-{news_data_str}
+{news_data}
 
 작성 규칙:
 1. 💡 **포트폴리오 총평**: 전체적인 흐름과 비중을 고려한 코멘트 (2줄)
 2. 🔍 **종목별 핵심 변동 원인 & 리스크 요인**: 각 종목별로 당일 등락 이유와 공시/뉴스 핵심을 2~3줄로 요약 (수치 데이터가 있으면 함께 언급)
 3. ⚠️ **내일 주목할 포인트/액션 제안**: 리스크 관리 관점의 팁 1줄
 """
-    response = client.models.generate_content(
-        model='gemini-3.6-flash',
-        contents=prompt
-    )
-    return response.text
+    last_err = None
+
+    # 503/429 일시적 장애 대비 최대 3회 점진적 재시도 (2초, 4초, 6초)
+    for attempt in range(3):
+        try:
+            res = client.models.generate_content(
+                model='gemini-3.6-flash',
+                contents=prompt
+            )
+            if res and res.text:
+                return res.text
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            if any(code in err_str for code in ["503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED"]):
+                time.sleep(2 * (attempt + 1))
+                continue
+            else:
+                break
+            
+    raise last_err
 
 if st.button("🚀 일간 브리핑 생성하기"):
     if not api_key or not api_key.strip():
         st.error("좌측 사이드바에 Gemini API Key를 입력해 주세요.")
     else:
-        # 사전 기반 즉시 변환
         stock_items = resolve_stock_info(tickers_input)
         display_names = [item['display_name'] for item in stock_items]
         st.info(f"💡 분석 대상 종목: **{' | '.join(display_names)}**")
@@ -192,7 +199,6 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 ticker = item['ticker']
                 is_korean = ticker.endswith((".KS", ".KQ"))
                 
-                # 1) 종가/등락률
                 close_str, change_str = fetch_daily_summary(ticker, is_korean)
                 market_data.append({
                     "종목명": disp_name,
@@ -200,12 +206,10 @@ if st.button("🚀 일간 브리핑 생성하기"):
                     "변동률 (%)": change_str
                 })
                 
-                # 2) 차트 데이터
                 series = fetch_chart_data(ticker, chart_period)
                 if not series.empty:
                     price_dict[disp_name] = (series, is_korean)
                 
-                # 3) 뉴스
                 try:
                     t_obj = yf.Ticker(ticker)
                     news_list = getattr(t_obj, 'news', [])
@@ -218,7 +222,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 except Exception:
                     news_data.append(f"[{disp_name}] 뉴스 수집 불가")
 
-            # --- 상단: 포트폴리오 현황 테이블 & 비중 도넛 차트 ---
+            # 상단 테이블 & 도넛 차트
             st.subheader("📈 포트폴리오 최근 거래일 현황")
             col1, col2 = st.columns([3, 2])
             
@@ -236,10 +240,9 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 pie_fig.update_layout(margin=dict(t=40, b=0, l=0, r=0), height=220)
                 st.plotly_chart(pie_fig, use_container_width=True)
 
-            # --- 중단: 종목별 개별 주가 추이 차트 ---
+            # 중단 개별 차트
             if price_dict:
                 st.subheader(f"📊 종목별 주가 흐름 ({selected_period_label})")
-                
                 cols_count = min(3, len(price_dict))
                 chart_cols = st.columns(cols_count)
                 
@@ -282,19 +285,21 @@ if st.button("🚀 일간 브리핑 생성하기"):
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
-        # --- 하단: AI 맞춤형 분석 브리핑 (캐시 및 429 쿨다운 대응) ---
+        # 하단 AI 브리핑
         with st.spinner("AI가 공시 및 뉴스를 분석하는 중..."):
             try:
                 report_text = generate_ai_briefing(
                     api_key.strip(), 
-                    str(market_data), 
-                    str(news_data)
+                    market_data, 
+                    news_data
                 )
                 st.subheader("🤖 AI 맞춤형 분석 브리핑")
                 st.markdown(report_text)
             except Exception as e:
                 err_msg = str(e)
-                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                    st.warning("⏳ 무료 API 호출 한도에 도달했습니다. 약 30초 후 자동으로 복구되니 잠시 후 다시 버튼을 눌러주세요.")
+                if "503" in err_msg or "UNAVAILABLE" in err_msg:
+                    st.warning("⚠️ 구글 서버 트래픽이 일시적으로 몰려 있습니다. 몇 초 후 다시 버튼을 누르면 정상 처리됩니다.")
+                elif "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                    st.error("🚨 무료 일일 호출 한도가 초과되었습니다. 새 API 키를 발급받거나 잠시 후 다시 시도해 주세요.")
                 else:
                     st.error(f"상세 에러 내용: {e}")
