@@ -3,6 +3,8 @@ import yfinance as yf
 from google import genai
 import pandas as pd
 import plotly.express as px
+import json
+import re
 import time
 
 st.set_page_config(page_title="AI 포트폴리오 일간 브리핑", layout="wide")
@@ -19,27 +21,33 @@ st.caption("내 보유 종목의 당일 주가 변동 및 핵심 뉴스를 AI가
 st.sidebar.header("내 포트폴리오 설정")
 tickers_input = st.sidebar.text_input(
     "보유 종목 입력 (한글명 또는 티커, 쉼표 구분)", 
-    "테슬라, QQQM, SPYM"
+    "삼성전자, 테슬라, QQQM"
 )
 weights_input = st.sidebar.text_input("비중 (%) 입력 (쉼표 구분)", "40, 40, 20")
 
 # 차트 기간 선택
 chart_period = st.sidebar.selectbox("주가 차트 조회 기간", ["1mo", "3mo", "6mo", "1y"], index=0)
 
-def resolve_tickers_with_ai(client, user_text):
-    """한글/영문 종목명 및 별칭을 yfinance 공식 티커 심볼로 자동 변환"""
+def resolve_stock_info_with_ai(client, user_text):
+    """종목명을 분석하여 [친숙한 표시명]과 [yfinance 공식 티커] 쌍으로 반환"""
     prompt = f"""
-당신은 금융 데이터 시스템의 종목명-티커 변환기입니다.
-다음 사용자가 입력한 주식 종목명들을 야후 파이낸스(yfinance)에서 조회 가능한 '공식 티커 심볼'로 변환하세요.
+당신은 금융 데이터 시스템의 종목명 변환기입니다.
+사용자가 입력한 각 주식 종목을 분석하여 yfinance 공식 티커와 사용자에게 보여줄 친숙한 표시명(display_name)을 JSON 배열로 반환하세요.
 
 규칙:
-1. 미국 주식/ETF는 영문 티커(예: TSLA, QQQ, AAPL, SPYM)로 변환
-2. 한국 주식은 코스피는 .KS, 코스닥은 .KQ(예: 삼성전자 -> 005930.KS, 에코프로비엠 -> 247540.KQ)
-3. 레버리지/인버스/ETF 별칭도 정확한 티커로 매핑 (예: 테슬라 2배 -> TSLL)
-4. 오직 쉼표(,)로 구분된 티커 심볼 문자열만 출력 (마크다운, 코드블록, 부가 설명 금지)
+1. 한국 주식: 코스피는 .KS, 코스닥은 .KQ (예: display_name: "삼성전자 (005930.KS)", ticker: "005930.KS")
+2. 미국 주식/ETF: (예: display_name: "테슬라 (TSLA)", ticker: "TSLA" / display_name: "QQQM (나스닥100)", ticker: "QQQM")
+3. 레버리지/ETF 별칭 매핑: (예: 테슬라 2배 -> display_name: "TSLL (테슬라 2X)", ticker: "TSLL")
+4. 반드시 순수 JSON Array 포맷만 반환 (마크다운 백틱, 설명 제외)
+
+형식:
+[
+  {{"display_name": "삼성전자 (005930.KS)", "ticker": "005930.KS"}},
+  {{"display_name": "테슬라 (TSLA)", "ticker": "TSLA"}},
+  {{"display_name": "QQQM", "ticker": "QQQM"}}
+]
 
 사용자 입력: "{user_text}"
-출력 예시: TSLA, QQQM, SPYM
 """
     candidate_models = ['gemini-3.6-flash', 'gemini-3.1-pro-preview']
     for model_name in candidate_models:
@@ -49,15 +57,16 @@ def resolve_tickers_with_ai(client, user_text):
                 contents=prompt
             )
             if res and res.text:
-                cleaned = res.text.strip().replace('`', '').replace('\n', '')
-                tickers = [t.strip().upper() for t in cleaned.split(',') if t.strip()]
-                if tickers:
-                    return tickers
+                cleaned = re.sub(r'```json\s*|\s*```', '', res.text).strip()
+                data = json.loads(cleaned)
+                if isinstance(data, list) and len(data) > 0:
+                    return data
         except Exception:
             continue
             
-    # AI 변환 실패 시 사용자 입력 단순 분리 fallback
-    return [t.strip().upper() for t in user_text.split(',') if t.strip()]
+    # AI 변환 실패 시 기본 fallback
+    raw_list = [t.strip().upper() for t in user_text.split(',') if t.strip()]
+    return [{"display_name": t, "ticker": t} for t in raw_list]
 
 def fetch_robust_history(ticker_symbol, period):
     """ETF 및 개별 종목의 과거 데이터를 안전하게 수집하는 함수"""
@@ -77,21 +86,10 @@ def fetch_robust_history(ticker_symbol, period):
     except Exception:
         pass
 
-    # 2차 시도: Ticker.history (auto_adjust=False)
+    # 2차 시도: Ticker.history
     try:
         t = yf.Ticker(ticker_symbol)
         hist = t.history(period=period, auto_adjust=False)
-        if not hist.empty and 'Close' in hist.columns:
-            s = hist['Close'].dropna()
-            if len(s) >= 2:
-                return s
-    except Exception:
-        pass
-
-    # 3차 시도: 1년치 fallback
-    try:
-        t = yf.Ticker(ticker_symbol)
-        hist = t.history(period="1y")
         if not hist.empty and 'Close' in hist.columns:
             s = hist['Close'].dropna()
             if len(s) >= 2:
@@ -107,24 +105,30 @@ if st.button("🚀 일간 브리핑 생성하기"):
     else:
         client = genai.Client(api_key=api_key.strip())
         
-        with st.spinner("입력된 종목명을 분석하고 공식 티커로 변환 중..."):
-            tickers = resolve_tickers_with_ai(client, tickers_input)
-            st.info(f"💡 인식된 공식 티커: **{', '.join(tickers)}**")
+        with st.spinner("입력된 종목을 분석하고 티커를 매핑하는 중..."):
+            stock_items = resolve_stock_info_with_ai(client, tickers_input)
+            display_names = [item['display_name'] for item in stock_items]
+            tickers = [item['ticker'] for item in stock_items]
+            st.info(f"💡 분석 대상 종목: **{' | '.join(display_names)}**")
 
         # 비중 파싱
         try:
             weights = [float(w.strip()) for w in weights_input.split(",") if w.strip()]
-            if len(weights) != len(tickers):
-                weights = [100 / len(tickers)] * len(tickers)
+            if len(weights) != len(stock_items):
+                weights = [100 / len(stock_items)] * len(stock_items)
         except Exception:
-            weights = [100 / len(tickers)] * len(tickers)
+            weights = [100 / len(stock_items)] * len(stock_items)
 
         with st.spinner("주가 데이터 및 최신 뉴스 수집 중..."):
             market_data = []
             news_data = []
             price_dict = {}
             
-            for ticker in tickers:
+            for item in stock_items:
+                disp_name = item['display_name']
+                ticker = item['ticker']
+                is_korean = ticker.endswith((".KS", ".KQ"))
+                
                 close_str = "N/A"
                 change_str = "0.00%"
                 
@@ -135,29 +139,31 @@ if st.button("🚀 일간 브리핑 생성하기"):
                     p_prev = float(series.iloc[-2])
                     diff_pct = ((p_today - p_prev) / p_prev) * 100
                     
-                    currency_symbol = "₩" if ticker.endswith((".KS", ".KQ")) else "$"
-                    close_str = f"{currency_symbol}{p_today:,.2f}"
+                    currency_symbol = "₩" if is_korean else "$"
+                    price_format = f"{currency_symbol}{p_today:,.0f}" if is_korean else f"{currency_symbol}{p_today:,.2f}"
+                    
+                    close_str = price_format
                     change_str = f"{diff_pct:+.2f}%"
-                    price_dict[ticker] = series
+                    price_dict[disp_name] = (series, is_korean)
                 
                 market_data.append({
-                    "Ticker": ticker,
-                    "Close": close_str,
-                    "Change (%)": change_str
+                    "종목명": disp_name,
+                    "종가 (Close)": close_str,
+                    "변동률 (%)": change_str
                 })
                 
-                # 최신 뉴스 수집
+                # 뉴스 수집
                 try:
                     t_obj = yf.Ticker(ticker)
                     news_list = getattr(t_obj, 'news', [])
                     if news_list and isinstance(news_list, list):
-                        titles = [item.get('title') for item in news_list[:2] if isinstance(item, dict) and item.get('title')]
+                        titles = [n.get('title') for n in news_list[:2] if isinstance(n, dict) and n.get('title')]
                         news_text = " / ".join(titles) if titles else "최신 특이 뉴스 없음"
-                        news_data.append(f"[{ticker}] {news_text}")
+                        news_data.append(f"[{disp_name}] {news_text}")
                     else:
-                        news_data.append(f"[{ticker}] 특이 뉴스 없음")
+                        news_data.append(f"[{disp_name}] 특이 뉴스 없음")
                 except Exception:
-                    news_data.append(f"[{ticker}] 뉴스 수집 불가")
+                    news_data.append(f"[{disp_name}] 뉴스 수집 불가")
 
             # --- 상단: 포트폴리오 현황 테이블 & 비중 도넛 차트 ---
             st.subheader("📈 포트폴리오 최근 거래일 현황")
@@ -168,7 +174,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 
             with col2:
                 pie_fig = px.pie(
-                    names=tickers, 
+                    names=display_names, 
                     values=weights, 
                     hole=0.4, 
                     title="포트폴리오 비중 구성",
@@ -184,7 +190,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 cols_count = min(3, len(price_dict))
                 chart_cols = st.columns(cols_count)
                 
-                for idx, (ticker, series) in enumerate(price_dict.items()):
+                for idx, (disp_name, (series, is_korean)) in enumerate(price_dict.items()):
                     col_idx = idx % cols_count
                     with chart_cols[col_idx]:
                         dates = [pd.to_datetime(d).strftime('%Y-%m-%d') for d in series.index]
@@ -195,13 +201,14 @@ if st.button("🚀 일간 브리핑 생성하기"):
                         })
                         
                         line_color = "#00C805" if series.values[-1] >= series.values[0] else "#FF333A"
-                        currency_symbol = "₩" if ticker.endswith((".KS", ".KQ")) else "$"
+                        currency_symbol = "₩" if is_korean else "$"
+                        last_p_str = f"{currency_symbol}{series.values[-1]:,.0f}" if is_korean else f"{currency_symbol}{series.values[-1]:,.2f}"
                         
                         fig = px.line(
                             single_df, 
                             x="Date", 
                             y="Price", 
-                            title=f"<b>{ticker}</b> ({currency_symbol}{series.values[-1]:,.2f})",
+                            title=f"<b>{disp_name}</b> ({last_p_str})",
                             labels={"Price": f"주가 ({currency_symbol})", "Date": "날짜"}
                         )
                         fig.update_traces(line_color=line_color, line_width=2.5)
