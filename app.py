@@ -25,7 +25,7 @@ chart_period = st.sidebar.selectbox("주가 차트 조회 기간", ["1mo", "3mo"
 
 def fetch_robust_history(ticker_symbol, period):
     """ETF 및 개별 종목의 과거 데이터를 누락 없이 안전하게 수집하는 함수"""
-    # 1차 시도: yf.download (auto_adjust=False로 ETF 과거 데이터 누락 방지)
+    # 1차 시도: yf.download
     try:
         df = yf.download(
             ticker_symbol, 
@@ -41,7 +41,7 @@ def fetch_robust_history(ticker_symbol, period):
     except Exception:
         pass
 
-    # 2차 시도: Ticker.history fallback
+    # 2차 시도: Ticker.history (auto_adjust=False)
     try:
         t = yf.Ticker(ticker_symbol)
         hist = t.history(period=period, auto_adjust=False)
@@ -52,7 +52,7 @@ def fetch_robust_history(ticker_symbol, period):
     except Exception:
         pass
 
-    # 3차 시도: 기본 history fallback
+    # 3차 시도: 1년치 기본 fallback
     try:
         t = yf.Ticker(ticker_symbol)
         hist = t.history(period="1y")
@@ -137,7 +137,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 pie_fig.update_layout(margin=dict(t=40, b=0, l=0, r=0), height=220)
                 st.plotly_chart(pie_fig, use_container_width=True)
 
-            # --- 중단: 종목별 개별 주가 추이 차트 (독립 Y축 & 정상 날짜 표시) ---
+            # --- 중단: 종목별 개별 주가 추이 차트 (독립 Y축 & 안전한 X축) ---
             if price_dict:
                 st.subheader(f"📊 종목별 개별 주가 흐름 ({chart_period.upper()})")
                 
@@ -147,8 +147,8 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 for idx, (ticker, series) in enumerate(price_dict.items()):
                     col_idx = idx % cols_count
                     with chart_cols[col_idx]:
-                        # 날짜를 인덱스에서 추출 후 포맷팅
-                        dates = pd.to_datetime(series.index).tz_localize(None).strftime('%Y-%m-%d')
+                        # 타임존 무관하게 안전한 YYYY-MM-DD 날짜 리스트 생성
+                        dates = [pd.to_datetime(d).strftime('%Y-%m-%d') for d in series.index]
                         
                         single_df = pd.DataFrame({
                             "Date": dates,
@@ -169,7 +169,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                             hovermode="x unified",
                             margin=dict(t=40, b=10, l=10, r=10),
                             height=250,
-                            xaxis=dict(showgrid=False, nbinsx=5),
+                            xaxis=dict(showgrid=False, nticks=5),
                             yaxis=dict(showgrid=True)
                         )
                         st.plotly_chart(fig, use_container_width=True)
