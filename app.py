@@ -140,7 +140,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 )
                 st.plotly_chart(line_fig, use_container_width=True)
 
-        # --- 하단: AI 맞춤형 분석 브리핑 ---
+       # --- 하단: AI 맞춤형 분석 브리핑 ---
         with st.spinner("AI가 공시 및 뉴스를 분석하는 중..."):
             try:
                 client = genai.Client(api_key=api_key.strip())
@@ -160,13 +160,29 @@ if st.button("🚀 일간 브리핑 생성하기"):
 2. 🔍 **종목별 핵심 변동 원인 & 리스크 요인**: 각 종목별로 당일 등락 이유와 공시/뉴스 핵심을 2~3줄로 요약 (수치 데이터가 있으면 함께 언급)
 3. ⚠️ **내일 주목할 포인트/액션 제안**: 리스크 관리 관점의 팁 1줄
 """
-                response = client.models.generate_content(
-                    model='gemini-3.6-flash',
-                    contents=prompt
-                )
+                # 서버 부하 시 대체 모델로 자동 전환
+                candidate_models = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-3.6-flash']
+                response_text = None
+                last_error = None
+
+                for target_model in candidate_models:
+                    try:
+                        response = client.models.generate_content(
+                            model=target_model,
+                            contents=prompt
+                        )
+                        response_text = response.text
+                        if response_text:
+                            break
+                    except Exception as e:
+                        last_error = e
+                        continue
                 
-                st.subheader("🤖 AI 맞춤형 분석 브리핑")
-                st.markdown(response.text)
+                if response_text:
+                    st.subheader("🤖 AI 맞춤형 분석 브리핑")
+                    st.markdown(response_text)
+                else:
+                    st.error(f"일시적인 서버 부하로 응답을 생성하지 못했습니다: {last_error}")
                 
             except Exception as e:
                 st.error(f"상세 에러 내용: {e}")
