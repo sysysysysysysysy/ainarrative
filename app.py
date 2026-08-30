@@ -48,6 +48,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 
                 try:
                     t_obj = yf.Ticker(ticker)
+                    # 1. 종목별 히스토리 데이터 수집
                     hist = t_obj.history(period=chart_period)
                     
                     if not hist.empty and 'Close' in hist.columns:
@@ -74,7 +75,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                     "Change (%)": change_str
                 })
                 
-                # 최신 뉴스 수집
+                # 2. 뉴스 수집
                 try:
                     t_obj = yf.Ticker(ticker)
                     news_list = getattr(t_obj, 'news', [])
@@ -105,24 +106,21 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 pie_fig.update_layout(margin=dict(t=40, b=0, l=0, r=0), height=220)
                 st.plotly_chart(pie_fig, use_container_width=True)
 
-            # --- 중단: 종목별 개별 주가 추이 차트 (단독 Y축) ---
+            # --- 중단: 종목별 개별 주가 추이 차트 (독립 Y축) ---
             if price_dict:
                 st.subheader(f"📊 종목별 개별 주가 흐름 ({chart_period.upper()})")
                 
-                # 화면 너비에 맞게 종목 수만큼 컬럼 생성 (최대 3단)
                 cols_count = min(3, len(price_dict))
                 chart_cols = st.columns(cols_count)
                 
                 for idx, (ticker, series) in enumerate(price_dict.items()):
                     col_idx = idx % cols_count
                     with chart_cols[col_idx]:
-                        # 개별 데이터프레임 구성
                         single_df = pd.DataFrame({
                             "Date": series.index.strftime('%Y-%m-%d'),
                             "Price": series.values
                         })
                         
-                        # 종목별 등락에 따른 메인 색상 선택
                         line_color = "#00C805" if series.values[-1] >= series.values[0] else "#FF333A"
                         
                         fig = px.line(
@@ -142,7 +140,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
-        # --- 하단: AI 맞춤형 분석 브리핑 ---
+        # --- 하단: AI 맞춤형 분석 브리핑 (재시도 & 최신 모델 적용) ---
         with st.spinner("AI가 공시 및 뉴스를 분석하는 중..."):
             try:
                 client = genai.Client(api_key=api_key.strip())
@@ -162,30 +160,34 @@ if st.button("🚀 일간 브리핑 생성하기"):
 2. 🔍 **종목별 핵심 변동 원인 & 리스크 요인**: 각 종목별로 당일 등락 이유와 공시/뉴스 핵심을 2~3줄로 요약 (수치 데이터가 있으면 함께 언급)
 3. ⚠️ **내일 주목할 포인트/액션 제안**: 리스크 관리 관점의 팁 1줄
 """
-                # 부하 분산 및 안정적 대체 모델 풀
-                candidate_models = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.5-pro']
+                # 최신 공식 모델 풀
+                candidate_models = ['gemini-3.6-flash', 'gemini-3.1-pro-preview']
                 response_text = None
                 last_error = None
 
                 for target_model in candidate_models:
-                    try:
-                        response = client.models.generate_content(
-                            model=target_model,
-                            contents=prompt
-                        )
-                        if response and response.text:
-                            response_text = response.text
-                            break
-                    except Exception as e:
-                        last_error = e
-                        time.sleep(1)  # 503 발생 시 1초 대기 후 대체 모델 시도
-                        continue
+                    # 503 등 일시적 부하 발생 시 최대 2회 재시도
+                    for attempt in range(2):
+                        try:
+                            response = client.models.generate_content(
+                                model=target_model,
+                                contents=prompt
+                            )
+                            if response and response.text:
+                                response_text = response.text
+                                break
+                        except Exception as e:
+                            last_error = e
+                            time.sleep(2)  # 트래픽 분산을 위한 2초 대기
+                    
+                    if response_text:
+                        break
                 
                 if response_text:
                     st.subheader("🤖 AI 맞춤형 분석 브리핑")
                     st.markdown(response_text)
                 else:
-                    st.error(f"일시적인 서버 부하로 응답을 생성하지 못했습니다: {last_error}")
+                    st.error(f"일시적인 서버 부하로 응답을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요: {last_error}")
                 
             except Exception as e:
                 st.error(f"상세 에러 내용: {e}")
