@@ -3,7 +3,6 @@ import yfinance as yf
 from google import genai
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 
 st.set_page_config(page_title="AI 포트폴리오 일간 브리핑", layout="wide")
 
@@ -40,63 +39,35 @@ if st.button("🚀 일간 브리핑 생성하기"):
         with st.spinner("주가 데이터 및 최신 뉴스 수집 중..."):
             market_data = []
             news_data = []
-            chart_df = pd.DataFrame()
+            price_dict = {}
             
-            # --- 1) 일괄 다운로드로 종가 데이터 추출 (안정성 극대화) ---
-            try:
-                raw_df = yf.download(
-                    tickers=tickers, 
-                    period=chart_period, 
-                    multi_level_index=False, 
-                    ignore_tz=True, 
-                    progress=False
-                )
-                
-                # 티커가 1개일 때 vs 여러 개일 때 'Close' 컬럼 추출
-                if len(tickers) == 1:
-                    chart_df[tickers[0]] = raw_df['Close'].dropna()
-                else:
-                    if 'Close' in raw_df.columns and isinstance(raw_df.columns, pd.MultiIndex):
-                        chart_df = raw_df['Close'].dropna(how='all')
-                    else:
-                        # yfinance 버전별 호환성 처리
-                        for t in tickers:
-                            if t in raw_df.columns:
-                                chart_df[t] = raw_df[t].dropna()
-                            elif ('Close', t) in raw_df.columns:
-                                chart_df[t] = raw_df[('Close', t)].dropna()
-            except Exception:
-                pass
-
-            # --- 2) 각 종목별 종가/등락률 계산 & 뉴스 수집 ---
             for ticker in tickers:
                 close_str = "N/A"
                 change_str = "0.00%"
                 
-                # 2-1. chart_df에서 추출 시도
-                if ticker in chart_df.columns and len(chart_df[ticker].dropna()) >= 2:
-                    s = chart_df[ticker].dropna()
-                    p_today = float(s.iloc[-1])
-                    p_prev = float(s.iloc[-2])
-                    diff_pct = ((p_today - p_prev) / p_prev) * 100
-                    close_str = f"${p_today:.2f}"
-                    change_str = f"{diff_pct:+.2f}%"
-                else:
-                    # 2-2. 개별 fallback 시도
-                    try:
-                        t_obj = yf.Ticker(ticker)
-                        hist = t_obj.history(period="1mo")
-                        if not hist.empty and 'Close' in hist:
-                            s = hist['Close'].dropna()
-                            if len(s) >= 2:
-                                p_today = float(s.iloc[-1])
-                                p_prev = float(s.iloc[-2])
-                                diff_pct = ((p_today - p_prev) / p_prev) * 100
-                                close_str = f"${p_today:.2f}"
-                                change_str = f"{diff_pct:+.2f}%"
-                                chart_df[ticker] = s
-                    except Exception:
-                        pass
+                try:
+                    t_obj = yf.Ticker(ticker)
+                    # 1. 종목별 히스토리 데이터 수집
+                    hist = t_obj.history(period=chart_period)
+                    
+                    if not hist.empty and 'Close' in hist.columns:
+                        # 타임존 제거 및 결측치 제거
+                        hist.index = hist.index.tz_localize(None)
+                        s = hist['Close'].dropna()
+                        
+                        if len(s) >= 2:
+                            p_today = float(s.iloc[-1])
+                            p_prev = float(s.iloc[-2])
+                            diff_pct = ((p_today - p_prev) / p_prev) * 100
+                            close_str = f"${p_today:.2f}"
+                            change_str = f"{diff_pct:+.2f}%"
+                            price_dict[ticker] = s
+                        elif len(s) == 1:
+                            p_today = float(s.iloc[-1])
+                            close_str = f"${p_today:.2f}"
+                            price_dict[ticker] = s
+                except Exception:
+                    pass
                 
                 market_data.append({
                     "Ticker": ticker,
@@ -104,7 +75,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                     "Change (%)": change_str
                 })
                 
-                # 뉴스 수집
+                # 2. 뉴스 수집
                 try:
                     t_obj = yf.Ticker(ticker)
                     news_list = getattr(t_obj, 'news', [])
@@ -136,31 +107,33 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 st.plotly_chart(pie_fig, use_container_width=True)
 
             # --- 중단: 종목별 주가 추이 라인 차트 ---
-            if not chart_df.empty:
-                st.subheader(f"📊 종목별 주가 추이 ({chart_period.upper()})")
+            if price_dict:
+                # 데이터프레임 병합 후 결측치는 앞/뒤 값으로 채움
+                chart_df = pd.DataFrame(price_dict).ffill().bfill()
+                # 날짜 인덱스를 깔끔한 YYYY-MM-DD 문자열로 변환 (X축 오류 방지)
+                chart_df.index = chart_df.index.strftime('%Y-%m-%d')
                 
+                st.subheader(f"📊 종목별 주가 추이 ({chart_period.upper()})")
                 normalize = st.checkbox("기준일 대비 수익률(%)로 정규화해서 비교하기", value=False)
                 
-                # Plotly 호환을 위해 Datetime Index를 일반 Date 컬럼으로 변환
-                plot_df = chart_df.copy().dropna()
-                if not plot_df.empty:
-                    if normalize:
-                        plot_df = (plot_df / plot_df.iloc[0] - 1) * 100
-                        y_title = "수익률 (%)"
-                    else:
-                        y_title = "주가 ($)"
-                    
-                    line_fig = px.line(
-                        plot_df, 
-                        labels={"value": y_title, "index": "날짜", "variable": "종목"},
-                        title="포트폴리오 종목별 가격 흐름"
-                    )
-                    line_fig.update_layout(
-                        hovermode="x unified",
-                        margin=dict(t=40, b=20, l=20, r=20),
-                        height=400
-                    )
-                    st.plotly_chart(line_fig, use_container_width=True)
+                if normalize:
+                    plot_df = (chart_df / chart_df.iloc[0] - 1) * 100
+                    y_title = "수익률 (%)"
+                else:
+                    plot_df = chart_df
+                    y_title = "주가 ($)"
+                
+                line_fig = px.line(
+                    plot_df, 
+                    labels={"value": y_title, "index": "날짜", "variable": "종목"},
+                    title="포트폴리오 종목별 가격 흐름"
+                )
+                line_fig.update_layout(
+                    hovermode="x unified",
+                    margin=dict(t=40, b=20, l=20, r=20),
+                    height=400
+                )
+                st.plotly_chart(line_fig, use_container_width=True)
 
         # --- 하단: AI 맞춤형 분석 브리핑 ---
         with st.spinner("AI가 공시 및 뉴스를 분석하는 중..."):
