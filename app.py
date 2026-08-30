@@ -3,6 +3,7 @@ import yfinance as yf
 from google import genai
 import pandas as pd
 import plotly.express as px
+import time
 
 st.set_page_config(page_title="AI 포트폴리오 일간 브리핑", layout="wide")
 
@@ -47,11 +48,9 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 
                 try:
                     t_obj = yf.Ticker(ticker)
-                    # 1. 종목별 히스토리 데이터 수집
                     hist = t_obj.history(period=chart_period)
                     
                     if not hist.empty and 'Close' in hist.columns:
-                        # 타임존 제거 및 결측치 제거
                         hist.index = hist.index.tz_localize(None)
                         s = hist['Close'].dropna()
                         
@@ -75,7 +74,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                     "Change (%)": change_str
                 })
                 
-                # 2. 뉴스 수집
+                # 최신 뉴스 수집
                 try:
                     t_obj = yf.Ticker(ticker)
                     news_list = getattr(t_obj, 'news', [])
@@ -88,7 +87,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 except Exception:
                     news_data.append(f"[{ticker}] 뉴스 수집 불가")
 
-            # --- 상단: 포트폴리오 현황 테이블 & 비중 차트 ---
+            # --- 상단: 포트폴리오 현황 테이블 & 비중 도넛 차트 ---
             st.subheader("📈 포트폴리오 최근 거래일 현황")
             col1, col2 = st.columns([3, 2])
             
@@ -106,34 +105,42 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 pie_fig.update_layout(margin=dict(t=40, b=0, l=0, r=0), height=220)
                 st.plotly_chart(pie_fig, use_container_width=True)
 
-            # --- 중단: 종목별 주가 추이 라인 차트 ---
+            # --- 중단: 종목별 개별 주가 추이 차트 (단독 Y축) ---
             if price_dict:
-                # 데이터프레임 병합 후 결측치는 앞/뒤 값으로 채움
-                chart_df = pd.DataFrame(price_dict).ffill().bfill()
-                # 날짜 인덱스를 깔끔한 YYYY-MM-DD 문자열로 변환 (X축 오류 방지)
-                chart_df.index = chart_df.index.strftime('%Y-%m-%d')
+                st.subheader(f"📊 종목별 개별 주가 흐름 ({chart_period.upper()})")
                 
-                st.subheader(f"📊 종목별 주가 추이 ({chart_period.upper()})")
-                normalize = st.checkbox("기준일 대비 수익률(%)로 정규화해서 비교하기", value=False)
+                # 화면 너비에 맞게 종목 수만큼 컬럼 생성 (최대 3단)
+                cols_count = min(3, len(price_dict))
+                chart_cols = st.columns(cols_count)
                 
-                if normalize:
-                    plot_df = (chart_df / chart_df.iloc[0] - 1) * 100
-                    y_title = "수익률 (%)"
-                else:
-                    plot_df = chart_df
-                    y_title = "주가 ($)"
-                
-                line_fig = px.line(
-                    plot_df, 
-                    labels={"value": y_title, "index": "날짜", "variable": "종목"},
-                    title="포트폴리오 종목별 가격 흐름"
-                )
-                line_fig.update_layout(
-                    hovermode="x unified",
-                    margin=dict(t=40, b=20, l=20, r=20),
-                    height=400
-                )
-                st.plotly_chart(line_fig, use_container_width=True)
+                for idx, (ticker, series) in enumerate(price_dict.items()):
+                    col_idx = idx % cols_count
+                    with chart_cols[col_idx]:
+                        # 개별 데이터프레임 구성
+                        single_df = pd.DataFrame({
+                            "Date": series.index.strftime('%Y-%m-%d'),
+                            "Price": series.values
+                        })
+                        
+                        # 종목별 등락에 따른 메인 색상 선택
+                        line_color = "#00C805" if series.values[-1] >= series.values[0] else "#FF333A"
+                        
+                        fig = px.line(
+                            single_df, 
+                            x="Date", 
+                            y="Price", 
+                            title=f"<b>{ticker}</b> (${series.values[-1]:.2f})",
+                            labels={"Price": "주가 ($)", "Date": "날짜"}
+                        )
+                        fig.update_traces(line_color=line_color, line_width=2.5)
+                        fig.update_layout(
+                            hovermode="x unified",
+                            margin=dict(t=40, b=10, l=10, r=10),
+                            height=250,
+                            xaxis=dict(showgrid=False),
+                            yaxis=dict(showgrid=True)
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
 
         # --- 하단: AI 맞춤형 분석 브리핑 ---
         with st.spinner("AI가 공시 및 뉴스를 분석하는 중..."):
@@ -155,7 +162,8 @@ if st.button("🚀 일간 브리핑 생성하기"):
 2. 🔍 **종목별 핵심 변동 원인 & 리스크 요인**: 각 종목별로 당일 등락 이유와 공시/뉴스 핵심을 2~3줄로 요약 (수치 데이터가 있으면 함께 언급)
 3. ⚠️ **내일 주목할 포인트/액션 제안**: 리스크 관리 관점의 팁 1줄
 """
-                candidate_models = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-3.6-flash']
+                # 부하 분산 및 안정적 대체 모델 풀
+                candidate_models = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.5-pro']
                 response_text = None
                 last_error = None
 
@@ -165,11 +173,12 @@ if st.button("🚀 일간 브리핑 생성하기"):
                             model=target_model,
                             contents=prompt
                         )
-                        response_text = response.text
-                        if response_text:
+                        if response and response.text:
+                            response_text = response.text
                             break
                     except Exception as e:
                         last_error = e
+                        time.sleep(1)  # 503 발생 시 1초 대기 후 대체 모델 시도
                         continue
                 
                 if response_text:
