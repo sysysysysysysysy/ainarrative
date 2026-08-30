@@ -23,6 +23,48 @@ weights_input = st.sidebar.text_input("비중 (%) 입력 (쉼표 구분)", "40, 
 # 차트 기간 선택
 chart_period = st.sidebar.selectbox("주가 차트 조회 기간", ["1mo", "3mo", "6mo", "1y"], index=0)
 
+def fetch_robust_history(ticker_symbol, period):
+    """ETF 및 개별 종목의 과거 데이터를 누락 없이 안전하게 수집하는 함수"""
+    # 1차 시도: yf.download (auto_adjust=False로 ETF 과거 데이터 누락 방지)
+    try:
+        df = yf.download(
+            ticker_symbol, 
+            period=period, 
+            auto_adjust=False, 
+            progress=False, 
+            multi_level_index=False
+        )
+        if not df.empty and 'Close' in df.columns:
+            s = df['Close'].dropna()
+            if len(s) >= 2:
+                return s
+    except Exception:
+        pass
+
+    # 2차 시도: Ticker.history fallback
+    try:
+        t = yf.Ticker(ticker_symbol)
+        hist = t.history(period=period, auto_adjust=False)
+        if not hist.empty and 'Close' in hist.columns:
+            s = hist['Close'].dropna()
+            if len(s) >= 2:
+                return s
+    except Exception:
+        pass
+
+    # 3차 시도: 기본 history fallback
+    try:
+        t = yf.Ticker(ticker_symbol)
+        hist = t.history(period="1y")
+        if not hist.empty and 'Close' in hist.columns:
+            s = hist['Close'].dropna()
+            if len(s) >= 2:
+                return s
+    except Exception:
+        pass
+
+    return pd.Series(dtype='float64')
+
 if st.button("🚀 일간 브리핑 생성하기"):
     if not api_key or not api_key.strip():
         st.error("좌측 사이드바에 Gemini API Key를 입력해 주세요.")
@@ -46,28 +88,17 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 close_str = "N/A"
                 change_str = "0.00%"
                 
-                try:
-                    t_obj = yf.Ticker(ticker)
-                    # 1. 종목별 히스토리 데이터 수집
-                    hist = t_obj.history(period=chart_period)
+                # 안정적인 시계열 데이터 수집
+                series = fetch_robust_history(ticker, chart_period)
+                
+                if not series.empty and len(series) >= 2:
+                    p_today = float(series.iloc[-1])
+                    p_prev = float(series.iloc[-2])
+                    diff_pct = ((p_today - p_prev) / p_prev) * 100
                     
-                    if not hist.empty and 'Close' in hist.columns:
-                        hist.index = hist.index.tz_localize(None)
-                        s = hist['Close'].dropna()
-                        
-                        if len(s) >= 2:
-                            p_today = float(s.iloc[-1])
-                            p_prev = float(s.iloc[-2])
-                            diff_pct = ((p_today - p_prev) / p_prev) * 100
-                            close_str = f"${p_today:.2f}"
-                            change_str = f"{diff_pct:+.2f}%"
-                            price_dict[ticker] = s
-                        elif len(s) == 1:
-                            p_today = float(s.iloc[-1])
-                            close_str = f"${p_today:.2f}"
-                            price_dict[ticker] = s
-                except Exception:
-                    pass
+                    close_str = f"${p_today:.2f}"
+                    change_str = f"{diff_pct:+.2f}%"
+                    price_dict[ticker] = series
                 
                 market_data.append({
                     "Ticker": ticker,
@@ -75,7 +106,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                     "Change (%)": change_str
                 })
                 
-                # 2. 뉴스 수집
+                # 최신 뉴스 수집
                 try:
                     t_obj = yf.Ticker(ticker)
                     news_list = getattr(t_obj, 'news', [])
@@ -106,7 +137,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 pie_fig.update_layout(margin=dict(t=40, b=0, l=0, r=0), height=220)
                 st.plotly_chart(pie_fig, use_container_width=True)
 
-            # --- 중단: 종목별 개별 주가 추이 차트 (독립 Y축) ---
+            # --- 중단: 종목별 개별 주가 추이 차트 (독립 Y축 & 정상 날짜 표시) ---
             if price_dict:
                 st.subheader(f"📊 종목별 개별 주가 흐름 ({chart_period.upper()})")
                 
@@ -116,8 +147,11 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 for idx, (ticker, series) in enumerate(price_dict.items()):
                     col_idx = idx % cols_count
                     with chart_cols[col_idx]:
+                        # 날짜를 인덱스에서 추출 후 포맷팅
+                        dates = pd.to_datetime(series.index).tz_localize(None).strftime('%Y-%m-%d')
+                        
                         single_df = pd.DataFrame({
-                            "Date": series.index.strftime('%Y-%m-%d'),
+                            "Date": dates,
                             "Price": series.values
                         })
                         
@@ -135,12 +169,12 @@ if st.button("🚀 일간 브리핑 생성하기"):
                             hovermode="x unified",
                             margin=dict(t=40, b=10, l=10, r=10),
                             height=250,
-                            xaxis=dict(showgrid=False),
+                            xaxis=dict(showgrid=False, nbinsx=5),
                             yaxis=dict(showgrid=True)
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
-        # --- 하단: AI 맞춤형 분석 브리핑 (재시도 & 최신 모델 적용) ---
+        # --- 하단: AI 맞춤형 분석 브리핑 ---
         with st.spinner("AI가 공시 및 뉴스를 분석하는 중..."):
             try:
                 client = genai.Client(api_key=api_key.strip())
@@ -160,13 +194,11 @@ if st.button("🚀 일간 브리핑 생성하기"):
 2. 🔍 **종목별 핵심 변동 원인 & 리스크 요인**: 각 종목별로 당일 등락 이유와 공시/뉴스 핵심을 2~3줄로 요약 (수치 데이터가 있으면 함께 언급)
 3. ⚠️ **내일 주목할 포인트/액션 제안**: 리스크 관리 관점의 팁 1줄
 """
-                # 최신 공식 모델 풀
                 candidate_models = ['gemini-3.6-flash', 'gemini-3.1-pro-preview']
                 response_text = None
                 last_error = None
 
                 for target_model in candidate_models:
-                    # 503 등 일시적 부하 발생 시 최대 2회 재시도
                     for attempt in range(2):
                         try:
                             response = client.models.generate_content(
@@ -178,7 +210,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                                 break
                         except Exception as e:
                             last_error = e
-                            time.sleep(2)  # 트래픽 분산을 위한 2초 대기
+                            time.sleep(2)
                     
                     if response_text:
                         break
