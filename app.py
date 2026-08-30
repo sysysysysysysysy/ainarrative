@@ -17,14 +17,50 @@ st.caption("내 보유 종목의 당일 주가 변동 및 핵심 뉴스를 AI가
 
 # 1. 포트폴리오 입력
 st.sidebar.header("내 포트폴리오 설정")
-tickers_input = st.sidebar.text_input("티커 입력 (쉼표 구분)", "SPLG, QQQ, TSLL")
+tickers_input = st.sidebar.text_input(
+    "보유 종목 입력 (한글명 또는 티커, 쉼표 구분)", 
+    "테슬라, QQQM, SPYM"
+)
 weights_input = st.sidebar.text_input("비중 (%) 입력 (쉼표 구분)", "40, 40, 20")
 
 # 차트 기간 선택
 chart_period = st.sidebar.selectbox("주가 차트 조회 기간", ["1mo", "3mo", "6mo", "1y"], index=0)
 
+def resolve_tickers_with_ai(client, user_text):
+    """한글/영문 종목명 및 별칭을 yfinance 공식 티커 심볼로 자동 변환"""
+    prompt = f"""
+당신은 금융 데이터 시스템의 종목명-티커 변환기입니다.
+다음 사용자가 입력한 주식 종목명들을 야후 파이낸스(yfinance)에서 조회 가능한 '공식 티커 심볼'로 변환하세요.
+
+규칙:
+1. 미국 주식/ETF는 영문 티커(예: TSLA, QQQ, AAPL, SPYM)로 변환
+2. 한국 주식은 코스피는 .KS, 코스닥은 .KQ(예: 삼성전자 -> 005930.KS, 에코프로비엠 -> 247540.KQ)
+3. 레버리지/인버스/ETF 별칭도 정확한 티커로 매핑 (예: 테슬라 2배 -> TSLL)
+4. 오직 쉼표(,)로 구분된 티커 심볼 문자열만 출력 (마크다운, 코드블록, 부가 설명 금지)
+
+사용자 입력: "{user_text}"
+출력 예시: TSLA, QQQM, SPYM
+"""
+    candidate_models = ['gemini-3.6-flash', 'gemini-3.1-pro-preview']
+    for model_name in candidate_models:
+        try:
+            res = client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
+            if res and res.text:
+                cleaned = res.text.strip().replace('`', '').replace('\n', '')
+                tickers = [t.strip().upper() for t in cleaned.split(',') if t.strip()]
+                if tickers:
+                    return tickers
+        except Exception:
+            continue
+            
+    # AI 변환 실패 시 사용자 입력 단순 분리 fallback
+    return [t.strip().upper() for t in user_text.split(',') if t.strip()]
+
 def fetch_robust_history(ticker_symbol, period):
-    """ETF 및 개별 종목의 과거 데이터를 누락 없이 안전하게 수집하는 함수"""
+    """ETF 및 개별 종목의 과거 데이터를 안전하게 수집하는 함수"""
     # 1차 시도: yf.download
     try:
         df = yf.download(
@@ -52,7 +88,7 @@ def fetch_robust_history(ticker_symbol, period):
     except Exception:
         pass
 
-    # 3차 시도: 1년치 기본 fallback
+    # 3차 시도: 1년치 fallback
     try:
         t = yf.Ticker(ticker_symbol)
         hist = t.history(period="1y")
@@ -69,8 +105,12 @@ if st.button("🚀 일간 브리핑 생성하기"):
     if not api_key or not api_key.strip():
         st.error("좌측 사이드바에 Gemini API Key를 입력해 주세요.")
     else:
-        tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+        client = genai.Client(api_key=api_key.strip())
         
+        with st.spinner("입력된 종목명을 분석하고 공식 티커로 변환 중..."):
+            tickers = resolve_tickers_with_ai(client, tickers_input)
+            st.info(f"💡 인식된 공식 티커: **{', '.join(tickers)}**")
+
         # 비중 파싱
         try:
             weights = [float(w.strip()) for w in weights_input.split(",") if w.strip()]
@@ -88,7 +128,6 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 close_str = "N/A"
                 change_str = "0.00%"
                 
-                # 안정적인 시계열 데이터 수집
                 series = fetch_robust_history(ticker, chart_period)
                 
                 if not series.empty and len(series) >= 2:
@@ -96,7 +135,8 @@ if st.button("🚀 일간 브리핑 생성하기"):
                     p_prev = float(series.iloc[-2])
                     diff_pct = ((p_today - p_prev) / p_prev) * 100
                     
-                    close_str = f"${p_today:.2f}"
+                    currency_symbol = "₩" if ticker.endswith((".KS", ".KQ")) else "$"
+                    close_str = f"{currency_symbol}{p_today:,.2f}"
                     change_str = f"{diff_pct:+.2f}%"
                     price_dict[ticker] = series
                 
@@ -137,7 +177,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 pie_fig.update_layout(margin=dict(t=40, b=0, l=0, r=0), height=220)
                 st.plotly_chart(pie_fig, use_container_width=True)
 
-            # --- 중단: 종목별 개별 주가 추이 차트 (독립 Y축 & 안전한 X축) ---
+            # --- 중단: 종목별 개별 주가 추이 차트 ---
             if price_dict:
                 st.subheader(f"📊 종목별 개별 주가 흐름 ({chart_period.upper()})")
                 
@@ -147,7 +187,6 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 for idx, (ticker, series) in enumerate(price_dict.items()):
                     col_idx = idx % cols_count
                     with chart_cols[col_idx]:
-                        # 타임존 무관하게 안전한 YYYY-MM-DD 날짜 리스트 생성
                         dates = [pd.to_datetime(d).strftime('%Y-%m-%d') for d in series.index]
                         
                         single_df = pd.DataFrame({
@@ -156,13 +195,14 @@ if st.button("🚀 일간 브리핑 생성하기"):
                         })
                         
                         line_color = "#00C805" if series.values[-1] >= series.values[0] else "#FF333A"
+                        currency_symbol = "₩" if ticker.endswith((".KS", ".KQ")) else "$"
                         
                         fig = px.line(
                             single_df, 
                             x="Date", 
                             y="Price", 
-                            title=f"<b>{ticker}</b> (${series.values[-1]:.2f})",
-                            labels={"Price": "주가 ($)", "Date": "날짜"}
+                            title=f"<b>{ticker}</b> ({currency_symbol}{series.values[-1]:,.2f})",
+                            labels={"Price": f"주가 ({currency_symbol})", "Date": "날짜"}
                         )
                         fig.update_traces(line_color=line_color, line_width=2.5)
                         fig.update_layout(
@@ -177,8 +217,6 @@ if st.button("🚀 일간 브리핑 생성하기"):
         # --- 하단: AI 맞춤형 분석 브리핑 ---
         with st.spinner("AI가 공시 및 뉴스를 분석하는 중..."):
             try:
-                client = genai.Client(api_key=api_key.strip())
-                
                 prompt = f"""
 당신은 금융 데이터 전문 애널리스트입니다.
 아래 사용자의 포트폴리오 현황(주가 및 등락률)과 종목별 최신 뉴스 데이터를 바탕으로 '일간 맞춤 브리핑 리포트'를 한글로 작성해주세요.
