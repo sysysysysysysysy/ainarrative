@@ -25,8 +25,24 @@ tickers_input = st.sidebar.text_input(
 )
 weights_input = st.sidebar.text_input("비중 (%) 입력 (쉼표 구분)", "40, 40, 20")
 
-# 차트 기간 선택
-chart_period = st.sidebar.selectbox("주가 차트 조회 기간", ["1mo", "3mo", "6mo", "1y"], index=0)
+# 차트 기간 선택 옵션 확장
+period_mapping = {
+    "1일 (당일 실시간 흐름)": "1d",
+    "5일 (최근 1주일)": "5d",
+    "1개월": "1mo",
+    "3개월": "3mo",
+    "6개월": "6mo",
+    "1년": "1y",
+    "3년": "3y",
+    "5년": "5y",
+    "전체 (Max)": "max"
+}
+selected_period_label = st.sidebar.selectbox(
+    "주가 차트 조회 기간", 
+    list(period_mapping.keys()), 
+    index=2
+)
+chart_period = period_mapping[selected_period_label]
 
 def resolve_stock_info_with_ai(client, user_text):
     """종목명을 분석하여 [친숙한 표시명]과 [yfinance 공식 티커] 쌍으로 반환"""
@@ -64,17 +80,41 @@ def resolve_stock_info_with_ai(client, user_text):
         except Exception:
             continue
             
-    # AI 변환 실패 시 기본 fallback
     raw_list = [t.strip().upper() for t in user_text.split(',') if t.strip()]
     return [{"display_name": t, "ticker": t} for t in raw_list]
 
-def fetch_robust_history(ticker_symbol, period):
-    """ETF 및 개별 종목의 과거 데이터를 안전하게 수집하는 함수"""
-    # 1차 시도: yf.download
+def fetch_daily_summary(ticker_symbol, is_korean):
+    """차트 기간 설정과 무관하게 항상 일간 최신 종가 및 전일비 등락률 산출"""
+    close_str = "N/A"
+    change_str = "0.00%"
+    currency_symbol = "₩" if is_korean else "$"
+    
+    try:
+        t = yf.Ticker(ticker_symbol)
+        hist = t.history(period="1mo", auto_adjust=False)
+        if not hist.empty and 'Close' in hist.columns:
+            s = hist['Close'].dropna()
+            if len(s) >= 2:
+                p_today = float(s.iloc[-1])
+                p_prev = float(s.iloc[-2])
+                diff_pct = ((p_today - p_prev) / p_prev) * 100
+                price_format = f"{currency_symbol}{p_today:,.0f}" if is_korean else f"{currency_symbol}{p_today:,.2f}"
+                return price_format, f"{diff_pct:+.2f}%"
+    except Exception:
+        pass
+    
+    return close_str, change_str
+
+def fetch_chart_data(ticker_symbol, period):
+    """기간별 적정 인터벌(분봉/일봉)을 적용해 차트용 시계열 데이터 수집"""
+    # 1일: 5분봉, 5일: 15분봉, 중장기: 일봉
+    interval = "5m" if period == "1d" else ("15m" if period == "5d" else "1d")
+    
     try:
         df = yf.download(
             ticker_symbol, 
             period=period, 
+            interval=interval,
             auto_adjust=False, 
             progress=False, 
             multi_level_index=False
@@ -86,10 +126,9 @@ def fetch_robust_history(ticker_symbol, period):
     except Exception:
         pass
 
-    # 2차 시도: Ticker.history
     try:
         t = yf.Ticker(ticker_symbol)
-        hist = t.history(period=period, auto_adjust=False)
+        hist = t.history(period=period, interval=interval, auto_adjust=False)
         if not hist.empty and 'Close' in hist.columns:
             s = hist['Close'].dropna()
             if len(s) >= 2:
@@ -108,10 +147,8 @@ if st.button("🚀 일간 브리핑 생성하기"):
         with st.spinner("입력된 종목을 분석하고 티커를 매핑하는 중..."):
             stock_items = resolve_stock_info_with_ai(client, tickers_input)
             display_names = [item['display_name'] for item in stock_items]
-            tickers = [item['ticker'] for item in stock_items]
             st.info(f"💡 분석 대상 종목: **{' | '.join(display_names)}**")
 
-        # 비중 파싱
         try:
             weights = [float(w.strip()) for w in weights_input.split(",") if w.strip()]
             if len(weights) != len(stock_items):
@@ -129,30 +166,20 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 ticker = item['ticker']
                 is_korean = ticker.endswith((".KS", ".KQ"))
                 
-                close_str = "N/A"
-                change_str = "0.00%"
-                
-                series = fetch_robust_history(ticker, chart_period)
-                
-                if not series.empty and len(series) >= 2:
-                    p_today = float(series.iloc[-1])
-                    p_prev = float(series.iloc[-2])
-                    diff_pct = ((p_today - p_prev) / p_prev) * 100
-                    
-                    currency_symbol = "₩" if is_korean else "$"
-                    price_format = f"{currency_symbol}{p_today:,.0f}" if is_korean else f"{currency_symbol}{p_today:,.2f}"
-                    
-                    close_str = price_format
-                    change_str = f"{diff_pct:+.2f}%"
-                    price_dict[disp_name] = (series, is_korean)
-                
+                # 1) 요약 테이블용 종가/등락률 계산
+                close_str, change_str = fetch_daily_summary(ticker, is_korean)
                 market_data.append({
                     "종목명": disp_name,
                     "종가 (Close)": close_str,
                     "변동률 (%)": change_str
                 })
                 
-                # 뉴스 수집
+                # 2) 선택된 기간별 차트 데이터 수집
+                series = fetch_chart_data(ticker, chart_period)
+                if not series.empty:
+                    price_dict[disp_name] = (series, is_korean)
+                
+                # 3) 뉴스 수집
                 try:
                     t_obj = yf.Ticker(ticker)
                     news_list = getattr(t_obj, 'news', [])
@@ -185,7 +212,7 @@ if st.button("🚀 일간 브리핑 생성하기"):
 
             # --- 중단: 종목별 개별 주가 추이 차트 ---
             if price_dict:
-                st.subheader(f"📊 종목별 개별 주가 흐름 ({chart_period.upper()})")
+                st.subheader(f"📊 종목별 주가 흐름 ({selected_period_label})")
                 
                 cols_count = min(3, len(price_dict))
                 chart_cols = st.columns(cols_count)
@@ -193,7 +220,16 @@ if st.button("🚀 일간 브리핑 생성하기"):
                 for idx, (disp_name, (series, is_korean)) in enumerate(price_dict.items()):
                     col_idx = idx % cols_count
                     with chart_cols[col_idx]:
-                        dates = [pd.to_datetime(d).strftime('%Y-%m-%d') for d in series.index]
+                        # 기간별 X축 시간 포맷팅
+                        if chart_period == "1d":
+                            dates = [pd.to_datetime(d).strftime('%H:%M') for d in series.index]
+                            x_label = "시간"
+                        elif chart_period == "5d":
+                            dates = [pd.to_datetime(d).strftime('%m/%d %H:%M') for d in series.index]
+                            x_label = "일시"
+                        else:
+                            dates = [pd.to_datetime(d).strftime('%Y-%m-%d') for d in series.index]
+                            x_label = "날짜"
                         
                         single_df = pd.DataFrame({
                             "Date": dates,
@@ -209,14 +245,14 @@ if st.button("🚀 일간 브리핑 생성하기"):
                             x="Date", 
                             y="Price", 
                             title=f"<b>{disp_name}</b> ({last_p_str})",
-                            labels={"Price": f"주가 ({currency_symbol})", "Date": "날짜"}
+                            labels={"Price": f"주가 ({currency_symbol})", "Date": x_label}
                         )
                         fig.update_traces(line_color=line_color, line_width=2.5)
                         fig.update_layout(
                             hovermode="x unified",
                             margin=dict(t=40, b=10, l=10, r=10),
-                            height=250,
-                            xaxis=dict(showgrid=False, nticks=5),
+                            height=260,
+                            xaxis=dict(showgrid=False, nticks=6),
                             yaxis=dict(showgrid=True)
                         )
                         st.plotly_chart(fig, use_container_width=True)
